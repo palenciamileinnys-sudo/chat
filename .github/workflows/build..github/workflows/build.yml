@@ -1,0 +1,53 @@
+name: Compile Boss Transformations
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'BossTransformations_Compilar_en_la_Nube.zip'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Extract source ZIP
+        shell: pwsh
+        run: |
+          Expand-Archive -Path "BossTransformations_Compilar_en_la_Nube.zip" -DestinationPath "source" -Force
+
+      - name: Locate project
+        id: project
+        shell: pwsh
+        run: |
+          $solution = Get-ChildItem "source" -Recurse -Filter *.sln | Select-Object -First 1
+          $project = Get-ChildItem "source" -Recurse -Filter *.csproj | Select-Object -First 1
+          if ($solution) {
+            "path=$($solution.FullName)" >> $env:GITHUB_OUTPUT
+          } elseif ($project) {
+            "path=$($project.FullName)" >> $env:GITHUB_OUTPUT
+          } else {
+            throw "No se encontró ningún archivo .sln ni .csproj."
+          }
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build mod
+        shell: pwsh
+        run: |
+          msbuild "${{ steps.project.outputs.path }}" /t:Restore,Build /p:Configuration=Release
+
+      - name: Upload compiled files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BossTransformations-build
+          path: |
+            source/**/*.dll
+            source/**/*.log
+          if-no-files-found: warn
