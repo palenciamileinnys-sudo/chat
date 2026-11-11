@@ -1,0 +1,82 @@
+name: Build Boss Transformations
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'BossTransformations_Compilar_en_la_Nube.zip'
+      - '.github/workflows/build-boss-transformations.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate and extract source ZIP
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'BossTransformations_Compilar_en_la_Nube.zip'
+          if (!(Test-Path $zip)) { throw "No se encontró el ZIP en la raíz del repositorio: $zip" }
+          $src = Join-Path $env:RUNNER_TEMP 'boss-transformations-src'
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $src -Force
+          "SOURCE_DIR=$src" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Get-ChildItem $src -Recurse -File | Select-Object -First 100 FullName | Format-Table -AutoSize
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore and build projects
+        shell: pwsh
+        run: |
+          $solutions = @(Get-ChildItem $env:SOURCE_DIR -Recurse -Filter *.sln -File)
+          $projects = @(Get-ChildItem $env:SOURCE_DIR -Recurse -Filter *.csproj -File)
+          if ($solutions.Count -gt 0) {
+            foreach ($s in $solutions) {
+              Write-Host "Restoring $($s.FullName)"
+              nuget restore $s.FullName
+              if ($LASTEXITCODE -ne 0) { throw "NuGet restore falló: $($s.FullName)" }
+              Write-Host "Building $($s.FullName)"
+              msbuild $s.FullName /m /p:Configuration=Release /p:Platform="Any CPU" /verbosity:minimal
+              if ($LASTEXITCODE -ne 0) { throw "MSBuild falló: $($s.FullName)" }
+            }
+          } elseif ($projects.Count -gt 0) {
+            foreach ($p in $projects) {
+              Write-Host "Restoring $($p.FullName)"
+              nuget restore $p.FullName
+              if ($LASTEXITCODE -ne 0) { throw "NuGet restore falló: $($p.FullName)" }
+              Write-Host "Building $($p.FullName)"
+              msbuild $p.FullName /m /p:Configuration=Release /verbosity:minimal
+              if ($LASTEXITCODE -ne 0) { throw "MSBuild falló: $($p.FullName)" }
+            }
+          } else {
+            throw 'El ZIP no contiene ningún archivo .sln ni .csproj. Revisa el contenido del ZIP.'
+          }
+
+      - name: Collect DLLs and build diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE 'build-output'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          if ($env:SOURCE_DIR -and (Test-Path $env:SOURCE_DIR)) {
+            Get-ChildItem $env:SOURCE_DIR -Recurse -Filter *.dll -File | Where-Object { $_.FullName -match '[\\/]bin[\\/]Release[\\/]' } | Copy-Item -Destination $out -Force
+            Get-ChildItem $env:SOURCE_DIR -Recurse -Include *.sln,*.csproj,packages.config -File | Select-Object FullName | Out-File (Join-Path $out 'project-files.txt')
+          }
+          if (!(Get-ChildItem $out -Filter *.dll -File -ErrorAction SilentlyContinue)) {
+            'No se generó ninguna DLL. Consulta el registro del trabajo.' | Out-File (Join-Path $out 'BUILD-FAILED.txt')
+          }
+
+      - name: Upload build output (DLLs or diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BossTransformations-build
+          path: build-output/
+          if-no-files-found: warn
+          retention-days: 14
